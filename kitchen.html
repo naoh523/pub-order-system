@@ -399,7 +399,7 @@
       <label><input type="checkbox" id="soundToggle" checked> 새 주문 알림음</label>
     </div>
     <div class="orders-grid" id="activeOrders"></div>
-    <details class="completed-wrap">
+    <details class="completed-wrap" id="completedWrap">
       <summary>완료 / 취소된 주문 (<span id="completedCount">0</span>)</summary>
       <div class="orders-grid muted" id="completedOrders"></div>
     </details>
@@ -679,6 +679,21 @@
   var activeOrdersCache = [];
   var knownOrderIds = {};
 
+  // 완료/취소 주문은 밤새 수백 건 쌓여요. 주문이 바뀔 때마다 전부 다시 그리면 주방 화면이 버벅여서
+  // 접힌 칸을 펼쳤을 때만, 최근 40건만 그려요.
+  var completedOrdersCache = [];
+  var COMPLETED_SHOW = 40;
+  function renderCompletedOrders(){
+    var wrapEl = document.getElementById('completedWrap');
+    if (!wrapEl.open){ document.getElementById('completedOrders').innerHTML = ''; return; }
+    renderOrderGrid('completedOrders', completedOrdersCache.slice(-COMPLETED_SHOW).reverse(), false);
+    if (completedOrdersCache.length > COMPLETED_SHOW){
+      document.getElementById('completedOrders').insertAdjacentHTML('beforeend',
+        '<div class="hint">최근 ' + COMPLETED_SHOW + '건만 보여요 (전체 ' + completedOrdersCache.length + '건)</div>');
+    }
+  }
+  document.getElementById('completedWrap').addEventListener('toggle', renderCompletedOrders);
+
   function initOrders(){
     db.collection('orders').orderBy('createdAt','asc').onSnapshot(function(snap){
       var active = [], completed = [];
@@ -695,7 +710,8 @@
       activeOrdersCache = active;
       renderTableBoard();
       renderOrderGrid('activeOrders', active, true);
-      renderOrderGrid('completedOrders', completed.slice().reverse(), false);
+      completedOrdersCache = completed;
+      renderCompletedOrders();
 
       if (!firstOrdersSnapshot){
         snap.docChanges().forEach(function(ch){

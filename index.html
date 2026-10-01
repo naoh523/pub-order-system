@@ -31,6 +31,8 @@
     color-scheme: light;
   }
   *{box-sizing:border-box;}
+  /* 빠르게 연속으로 누를 때 두 번째 탭이 '더블탭 확대'로 먹히지 않게 */
+  html, body, button, input, label, .item-card{ touch-action: manipulation; }
   html,body{height:100%;}
   body{
     margin:0;
@@ -213,9 +215,12 @@
   .sheet-backdrop{
     position:fixed; inset:0; z-index:50; background:rgba(31,26,23,0.45);
     display:flex; align-items:flex-end; justify-content:center;
+    overscroll-behavior: contain;
   }
+  body.sheet-open{ overflow:hidden; }
   .sheet{
     width:100%; max-width:640px; max-height:90vh; overflow-y:auto;
+    overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
     background:#fff; border-radius: 20px 20px 0 0;
     padding: 22px 20px calc(24px + env(safe-area-inset-bottom,0px));
     border-top:4px solid var(--red);
@@ -247,6 +252,7 @@
     height:48px; border-radius:10px; border:1.5px solid var(--border); background:#fff;
     font-size:17px; font-weight:800; color:var(--ink); cursor:pointer;
   }
+  .table-chip:active{ transform:scale(0.95); }
   .table-chip.active{ background:var(--red); border-color:var(--red); color:#fff; }
   .table-fixed{
     display:flex; align-items:center; justify-content:space-between;
@@ -566,8 +572,29 @@
         '<button class="btn-secondary" style="margin-top:12px" onclick="location.reload()">새로고침</button></div>';
     });
 
-    renderHistory();
+    // 주문내역은 열었을 때만 그려요 (주문마다 상태를 하나씩 서버에서 읽어오기 때문)
     startWaitListeners();
+  }
+
+  // ---------- 메뉴 사진 ----------
+  // 사진은 수십~수백 KB짜리 글자(dataURL)라, 메뉴를 다시 그릴 때마다 HTML에 통째로 넣으면
+  // 폰이 매번 그 글자를 읽고 사진을 다시 풀어야 해서 버벅여요. 한 번만 짧은 blob 주소로 바꿔서 재사용해요.
+  var photoUrlCache = {}; // id -> { src, url }
+  function photoUrl(id, src){
+    var c = photoUrlCache[id];
+    if (c && c.src === src) return c.url;
+    if (c && c.url !== c.src) URL.revokeObjectURL(c.url);
+    var url = src;
+    try{
+      var m = /^data:([^;,]+);base64,/.exec(src);
+      if (m){
+        var bin = atob(src.slice(m[0].length)), n = bin.length, u8 = new Uint8Array(n);
+        while (n--) u8[n] = bin.charCodeAt(n);
+        url = URL.createObjectURL(new Blob([u8], { type: m[1] }));
+      }
+    }catch(e){ url = src; }
+    photoUrlCache[id] = { src: src, url: url };
+    return url;
   }
 
   // ---------- 메뉴 렌더링 ----------
@@ -617,7 +644,7 @@
         var it = menuItems[id];
         var qty = cart[id] || 0;
         html += '<div class="item-card ' + (it.soldOut ? 'soldout' : '') + '" data-id="' + id + '">';
-        if (it.thumb || it.image) html += '<img class="item-thumb" data-id="' + id + '" src="' + (it.thumb || it.image) + '" alt="' + escapeHtml(it.name||'') + '" loading="lazy">';
+        if (it.thumb || it.image) html += '<img class="item-thumb" data-id="' + id + '" src="' + photoUrl(id, it.thumb || it.image) + '" alt="' + escapeHtml(it.name||'') + '" width="92" height="92" decoding="async">';
         html += '<div class="item-info"><div class="item-name">' + escapeHtml(it.name||'') + '</div>';
         if (it.desc) html += '<div class="item-desc">' + escapeHtml(it.desc) + '</div>';
         if (it.cartNotice && !it.soldOut) html += '<div class="item-notice" ' + (qty > 0 ? '' : 'hidden') + '>' + escapeHtml(it.cartNotice) + '</div>';
@@ -651,6 +678,11 @@
     wrap.querySelectorAll('.qty-minus').forEach(function(btn){
       btn.addEventListener('click', function(){ changeQty(btn.dataset.id, -1); });
     });
+  }
+
+  function resetQtyDisplay(){
+    document.querySelectorAll('#menuList .item-card .qty').forEach(function(el){ el.textContent = '0'; });
+    document.querySelectorAll('#menuList .item-card .item-notice').forEach(function(el){ el.hidden = true; });
   }
 
   function showWarning(text){
@@ -861,17 +893,17 @@
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       };
       return db.collection('orders').add(orderData).then(function(ref){
-        return { id: ref.id, orderNumber: orderNumber, tableNo: tableNo, total: s.total, lines: s.lines };
+        return { id: ref.id, orderNumber: orderNumber, tableNo: tableNo, total: s.total, lines: s.lines, data: orderData };
       });
     }).then(function(result){
       cart = {};
       saveCart();
-      renderMenu();
+      // 메뉴판 전체(사진 포함)를 다시 그리지 않고 수량 숫자만 0으로 — 주문 직후·추가 주문 때 버벅임 방지
+      resetQtyDisplay();
       updateCartBar();
       pushHistory({ id: result.id, orderNumber: result.orderNumber, tableNo: result.tableNo, total: result.total, ts: Date.now() });
       orderSheetBackdrop.hidden = true;
-      openStatusSheet(result.id);
-      renderHistory();
+      openStatusSheet(result.id, Object.assign({}, result.data, { createdAt: null }));
     }).catch(function(err){
       console.error(err);
       toast(errorMessage(err));
@@ -1158,6 +1190,7 @@
   });
 
   var STATUS_LABEL = {
+    loading: '불러오는 중…',
     awaiting_payment: '입금 확인 대기중',
     paid: '입금 확인 완료 · 준비중',
     completed: '준비 완료!',
@@ -1170,9 +1203,12 @@
     cancelled: '이 주문은 취소되었어요. 문의사항은 스태프에게 말씀해주세요.'
   };
 
-  function openStatusSheet(orderId){
+  function openStatusSheet(orderId, initial){
     currentOrderId = orderId;
     if (currentOrderUnsub) currentOrderUnsub();
+    // 서버 응답을 기다리는 동안 이전 주문 내용이 보이지 않게: 방금 넣은 주문이면 바로 그리고, 아니면 비워두기
+    if (initial) renderStatus(initial);
+    else renderStatus({ orderNumber: '…', status: 'loading', items: [], totalAmount: 0 });
     statusSheetBackdrop.hidden = false;
     currentOrderUnsub = db.collection('orders').doc(orderId).onSnapshot(function(snap){
       if (!snap.exists) return;
@@ -1234,6 +1270,18 @@
     });
     list.innerHTML = '';
     list.appendChild(frag);
+  }
+
+  // ---------- 시트 열림 동안 뒤 페이지 스크롤 잠금 ----------
+  // (시트 안을 스크롤하다 뒤 메뉴판이 같이 움직이면, 그 사이 탭이 스크롤로 먹혀서 버튼이 안 눌려요)
+  var sheetBackdrops = document.querySelectorAll('.sheet-backdrop');
+  function syncSheetLock(){
+    var open = Array.prototype.some.call(sheetBackdrops, function(b){ return !b.hidden; });
+    document.body.classList.toggle('sheet-open', open);
+  }
+  if (window.MutationObserver){
+    var sheetObs = new MutationObserver(syncSheetLock);
+    sheetBackdrops.forEach(function(b){ sheetObs.observe(b, { attributes: true, attributeFilter: ['hidden'] }); });
   }
 
   // 모든 준비가 끝난 뒤 실시간 연결 시작
